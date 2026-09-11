@@ -1,0 +1,173 @@
+package com.interviewbooth.service;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.interviewbooth.dto.QuestionDTO;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Service;
+
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.UUID;
+
+/**
+ * Talks to the free-tier Google Gemini API to (1) generate interview questions on
+ * demand and (2) score/critique a candidate's spoken/typed answer.
+ *
+ * Requires the GEMINI_API_KEY environment variable to be set before starting the
+ * app. Get a free key (no credit card needed) at https://aistudio.google.com.
+ * If it's missing, this service falls back to a small built-in question set and a
+ * simple heuristic score, so the app still runs end-to-end without a key.
+ */
+@Service
+public class AIService {
+
+    @Value("${gemini.api.key}")
+    private String apiKey;
+
+    @Value("${gemini.api.model}")
+    private String model;
+
+    @Value("${gemini.api.url}")
+    private String apiUrl;
+
+    private final HttpClient httpClient = HttpClient.newBuilder()
+            .connectTimeout(Duration.ofSeconds(15))
+            .build();
+
+    private final ObjectMapper mapper = new ObjectMapper();
+
+    public List<QuestionDTO> generateQuestions(String role, String difficulty, String roundType, int count) {
+        if (apiKey == null || apiKey.isBlank()) {
+            return fallbackQuestions(role, roundType);
+        }
+
+        String systemPrompt = "You are an expert technical interviewer. " +
+                "Generate interview questions and respond with ONLY a JSON array of strings, " +
+                "no markdown, no preamble, no extra keys. Example: [\"question 1\", \"question 2\"]";
+
+        String userPrompt = String.format(
+                "Generate %d %s-round interview questions for a %s candidate at %s difficulty level. " +
+                "Questions should be specific and realistic, the kind actually asked in interviews.",
+                count, roundType, role, difficulty);
+
+        try {
+            String responseText = callGemini(systemPrompt, userPrompt);
+            JsonNode arr = mapper.readTree(extractJson(responseText));
+            List<QuestionDTO> questions = new ArrayList<>();
+            for (JsonNode node : arr) {
+                questions.add(new QuestionDTO(UUID.randomUUID().toString(), node.asText()));
+            }
+            if (!questions.isEmpty()) return questions;
+        } catch (Exception e) {
+            // Log and fall back rather than breaking the interview flow.
+            System.err.println("AI question generation failed, using fallback: " + e.getMessage());
+        }
+        return fallbackQuestions(role, roundType);
+    }
+
+    public ScoreResult scoreAnswer(String question, String answer, String role, String difficulty) {
+        if (apiKey == null || apiKey.isBlank()) {
+            return heuristicScore(answer);
+        }
+
+        String systemPrompt = "You are an expert technical interview evaluator. " +
+                "Respond with ONLY a JSON object of the form " +
+                "{\"score\": <integer 0-100>, \"feedback\": \"<2-3 sentence constructive feedback>\"}. " +
+                "No markdown, no extra text.";
+
+        String userPrompt = String.format(
+                "Role: %s\nDifficulty: %s\nQuestion: %s\nCandidate answer: %s\n\n" +
+                "Evaluate correctness, clarity, and depth. Score fairly.",
+                role, difficulty, question, answer);
+
+        try {
+            String responseText = callGemini(systemPrompt, userPrompt);
+            JsonNode obj = mapper.readTree(extractJson(responseText));
+            int score = obj.get("score").asInt();
+            String feedback = obj.get("feedback").asText();
+            return new ScoreResult(score, feedback);
+        } catch (Exception e) {
+            System.err.println("AI scoring failed, using fallback: " + e.getMessage());
+            return heuristicScore(answer);
+        }
+    }
+
+    private String callGemini(String systemPrompt, String userPrompt) throws Exception {
+        String escapedSystem = mapper.writeValueAsString(systemPrompt);
+        String escapedUser = mapper.writeValueAsString(userPrompt);
+
+        // Gemini's generateContent request shape: system_instruction + contents (each
+        // holding "parts" of text). This differs from Anthropic/OpenAI's message format.
+        String body = String.format("""
+                {
+                  "system_instruction": { "parts": [{ "text": %s }] },
+                  "contents": [{ "parts": [{ "text": %s }] }],
+                  "generationConfig": { "temperature": 0.7, "maxOutputTokens": 1024 }
+                }
+                """, escapedSystem, escapedUser);
+
+        String url = apiUrl + "/" + model + ":generateContent";
+
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(url))
+                .header("Content-Type", "application/json")
+                .header("x-goog-api-key", apiKey)
+                .POST(HttpRequest.BodyPublishers.ofString(body))
+                .build();
+
+        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+
+        if (response.statusCode() != 200) {
+            throw new RuntimeException("Gemini API error " + response.statusCode() + ": " + response.body());
+        }
+
+        JsonNode root = mapper.readTree(response.body());
+        return root.get("candidates").get(0).get("content").get("parts").get(0).get("text").asText();
+    }
+
+    /** Gemini sometimes wraps JSON in prose or code fences despite instructions; this strips that. */
+    private String extractJson(String text) {
+        String trimmed = text.trim();
+        int start = Math.min(
+                indexOfOrMax(trimmed, '['),
+                indexOfOrMax(trimmed, '{'));
+        int endBracket = trimmed.lastIndexOf(']');
+        int endBrace = trimmed.lastIndexOf('}');
+        int end = Math.max(endBracket, endBrace);
+        if (start == Integer.MAX_VALUE || end == -1) return trimmed;
+        return trimmed.substring(start, end + 1);
+    }
+
+    private int indexOfOrMax(String s, char c) {
+        int idx = s.indexOf(c);
+        return idx == -1 ? Integer.MAX_VALUE : idx;
+    }
+
+    private ScoreResult heuristicScore(String answer) {
+        int words = answer.trim().isEmpty() ? 0 : answer.trim().split("\\s+").length;
+        int score = Math.min(96, Math.max(40, words * 3 + 35));
+        String feedback = words > 15
+                ? "Clear technical points mentioned. (Heuristic score - set GEMINI_API_KEY for real AI evaluation.)"
+                : "Consider expanding with more domain specifics. (Heuristic score - set GEMINI_API_KEY for real AI evaluation.)";
+        return new ScoreResult(score, feedback);
+    }
+
+    private List<QuestionDTO> fallbackQuestions(String role, String roundType) {
+        List<QuestionDTO> list = new ArrayList<>();
+        list.add(new QuestionDTO(UUID.randomUUID().toString(),
+                "Tell me about your experience relevant to the " + role + " role."));
+        list.add(new QuestionDTO(UUID.randomUUID().toString(),
+                "What was the most challenging problem you solved recently, and how did you approach it?"));
+        list.add(new QuestionDTO(UUID.randomUUID().toString(),
+                "For a " + roundType + " round: describe a project where you had to learn something new quickly."));
+        return list;
+    }
+
+    public record ScoreResult(int score, String feedback) {}
+}
