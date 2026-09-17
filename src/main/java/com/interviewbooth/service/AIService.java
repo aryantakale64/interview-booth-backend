@@ -76,18 +76,26 @@ public class AIService {
             return heuristicScore(answer);
         }
 
-        String systemPrompt = "You are an expert technical interview evaluator. " +
+        String systemPrompt = "You are a strict, no-nonsense technical interview evaluator. " +
                 "Respond with ONLY a JSON object of the form " +
-                "{\"score\": <integer 0-100>, \"feedback\": \"<2-3 sentence constructive feedback>\"}. " +
-                "No markdown, no extra text.";
+                "{\"score\": <integer 0-100>, \"feedback\": \"<2-3 sentence specific feedback>\"}. " +
+                "No markdown, no extra text.\n\n" +
+                "You MUST follow these scoring rules exactly, in order:\n" +
+                "1. If the answer is gibberish, random keyboard mashing, nonsensical characters, or not real words in any language, score it 0-5, no exceptions.\n" +
+                "2. If the answer is empty, just repeats the question, or is completely unrelated to the question topic, score it 0-10.\n" +
+                "3. If the answer is real language but too short or vague to show any real understanding, score it 10-30.\n" +
+                "4. Only score above 70 if the answer is coherent, relevant to the specific question asked, and demonstrates genuine technical understanding.\n" +
+                "Do not be lenient, encouraging, or generous with the NUMBER — accuracy matters most. " +
+                "Save any encouragement for the feedback text, and only if the score actually earned it.";
 
         String userPrompt = String.format(
-                "Role: %s\nDifficulty: %s\nQuestion: %s\nCandidate answer: %s\n\n" +
-                "Evaluate correctness, clarity, and depth. Score fairly.",
+                "Role: %s\nDifficulty: %s\nQuestion: %s\nCandidate answer: \"%s\"\n\n" +
+                "First silently check: is this answer coherent, real language, and actually relevant to the question? " +
+                "Then apply the scoring rules strictly and give your honest score and feedback.",
                 role, difficulty, question, answer);
 
         try {
-            String responseText = callGemini(systemPrompt, userPrompt);
+            String responseText = callGemini(systemPrompt, userPrompt, 250);
             JsonNode obj = mapper.readTree(extractJson(responseText));
             int score = obj.get("score").asInt();
             String feedback = obj.get("feedback").asText();
@@ -99,6 +107,10 @@ public class AIService {
     }
 
     private String callGemini(String systemPrompt, String userPrompt) throws Exception {
+        return callGemini(systemPrompt, userPrompt, 1024);
+    }
+
+    private String callGemini(String systemPrompt, String userPrompt, int maxOutputTokens) throws Exception {
         String escapedSystem = mapper.writeValueAsString(systemPrompt);
         String escapedUser = mapper.writeValueAsString(userPrompt);
 
@@ -108,9 +120,9 @@ public class AIService {
                 {
                   "system_instruction": { "parts": [{ "text": %s }] },
                   "contents": [{ "parts": [{ "text": %s }] }],
-                  "generationConfig": { "temperature": 0.7, "maxOutputTokens": 1024 }
+                  "generationConfig": { "temperature": 0.4, "maxOutputTokens": %d }
                 }
-                """, escapedSystem, escapedUser);
+                """, escapedSystem, escapedUser, maxOutputTokens);
 
         String url = apiUrl + "/" + model + ":generateContent";
 
@@ -118,6 +130,7 @@ public class AIService {
                 .uri(URI.create(url))
                 .header("Content-Type", "application/json")
                 .header("x-goog-api-key", apiKey)
+                .timeout(Duration.ofSeconds(20)) // bounds total wait: fails over to the fallback scorer instead of hanging indefinitely
                 .POST(HttpRequest.BodyPublishers.ofString(body))
                 .build();
 
@@ -150,8 +163,24 @@ public class AIService {
     }
 
     private ScoreResult heuristicScore(String answer) {
-        int words = answer.trim().isEmpty() ? 0 : answer.trim().split("\\s+").length;
-        int score = Math.min(96, Math.max(40, words * 3 + 35));
+        String trimmed = answer.trim();
+        int words = trimmed.isEmpty() ? 0 : trimmed.split("\\s+").length;
+
+        // Crude gibberish detector: real English text is roughly 35-45% vowels.
+        // Random keyboard mashing (e.g. "hjebfjhebfjh") has very few vowels relative
+        // to its length, since real words need vowels to be pronounceable/readable.
+        String lettersOnly = trimmed.toLowerCase().replaceAll("[^a-z]", "");
+        long vowelCount = lettersOnly.chars().filter(c -> "aeiou".indexOf(c) >= 0).count();
+        double vowelRatio = lettersOnly.isEmpty() ? 0 : (double) vowelCount / lettersOnly.length();
+
+        if (lettersOnly.isEmpty()) {
+            return new ScoreResult(0, "No answer detected. (Heuristic score - set GEMINI_API_KEY for real AI evaluation.)");
+        }
+        if (vowelRatio < 0.15 || (words <= 2 && lettersOnly.length() > 8 && vowelRatio < 0.25)) {
+            return new ScoreResult(5, "This doesn't look like a real answer (unrecognizable text). (Heuristic score - set GEMINI_API_KEY for real AI evaluation.)");
+        }
+
+        int score = Math.min(90, Math.max(20, words * 3 + 25));
         String feedback = words > 15
                 ? "Clear technical points mentioned. (Heuristic score - set GEMINI_API_KEY for real AI evaluation.)"
                 : "Consider expanding with more domain specifics. (Heuristic score - set GEMINI_API_KEY for real AI evaluation.)";

@@ -1,13 +1,18 @@
 package com.interviewbooth.service;
 
 import com.interviewbooth.dto.AuthResponse;
+import com.interviewbooth.dto.ForgotPasswordRequest;
 import com.interviewbooth.dto.LoginRequest;
 import com.interviewbooth.dto.RegisterRequest;
+import com.interviewbooth.dto.ResetPasswordRequest;
 import com.interviewbooth.model.User;
 import com.interviewbooth.repository.UserRepository;
 import com.interviewbooth.security.JwtUtil;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
+
+import java.time.LocalDateTime;
+import java.util.UUID;
 
 @Service
 public class AuthService {
@@ -15,11 +20,13 @@ public class AuthService {
     private final UserRepository userRepository;
     private final PasswordEncoder passwordEncoder;
     private final JwtUtil jwtUtil;
+    private final EmailService emailService;
 
-    public AuthService(UserRepository userRepository, PasswordEncoder passwordEncoder, JwtUtil jwtUtil) {
+    public AuthService(UserRepository userRepository, PasswordEncoder passwordEncoder, JwtUtil jwtUtil, EmailService emailService) {
         this.userRepository = userRepository;
         this.passwordEncoder = passwordEncoder;
         this.jwtUtil = jwtUtil;
+        this.emailService = emailService;
     }
 
     public AuthResponse register(RegisterRequest request) {

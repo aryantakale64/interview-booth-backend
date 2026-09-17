@@ -1,6 +1,7 @@
 package com.interviewbooth.model;
 
 import jakarta.persistence.*;
+import java.time.LocalDateTime;
 
 @Entity
 @Table(name = "users")
@@ -26,6 +27,10 @@ public class User {
     @Column(nullable = false)
     private String role = "STUDENT"; // STUDENT or ADMIN
 
+    // Password reset support: a one-time token + its expiry, cleared once used
+    private String resetToken;
+    private LocalDateTime resetTokenExpiry;
+
     public User() {}
 
     public Long getId() { return id; }
@@ -48,4 +53,10 @@ public class User {
 
     public String getRole() { return role; }
     public void setRole(String role) { this.role = role; }
+
+    public String getResetToken() { return resetToken; }
+    public void setResetToken(String resetToken) { this.resetToken = resetToken; }
+
+    public LocalDateTime getResetTokenExpiry() { return resetTokenExpiry; }
+    public void setResetTokenExpiry(LocalDateTime resetTokenExpiry) { this.resetTokenExpiry = resetTokenExpiry; }
 }
