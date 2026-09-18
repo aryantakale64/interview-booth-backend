@@ -186,7 +186,7 @@ public class AIService {
             return new ScoreResult(0, "No answer was provided for this question.");
         }
         if (vowelRatio < 0.15 || (words <= 2 && lettersOnly.length() > 8 && vowelRatio < 0.25)) {
-            return new ScoreResult(5, "This answer doesn't appear to be real, relevant text for the question asked.");
+            return new ScoreResult(0, "This answer doesn't appear to be real, relevant text for the question asked.");
         }
 
         int score = Math.min(90, Math.max(20, words * 3 + 25));
